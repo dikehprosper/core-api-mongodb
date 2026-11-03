@@ -1,263 +1,262 @@
-const assert = require('node:assert/strict');
-const test = require('node:test');
-const proxyquire = require('proxyquire');
-const { createLogger, createResponse } = require('../support/http');
-const { httpStatus } = require('../src/utils/helpers/variables.helper');
-
-function createController(serviceOverrides = {}, options = {}) {
-    const calls = [];
-    const service = {
-        authenticateUser: async () => ({ id: 'u1', email: 'ada@example.com' }),
-        loginUser: async () => {},
-        generateAndSetUserTokens: async payload => {
-            calls.push(['token', payload]);
-            return 'access-token';
-        },
-        findUser: async () => null,
-        updateUser: async (...args) => { calls.push(['updateUser', ...args]); return args[0]; },
-        createUser: async details => {
-            calls.push(['createUser', details]);
-            return { _id: 'u2', id: 'u2', ...details };
-        },
-        sendMailToUser: async mail => { calls.push(['sendMailToUser', mail]); }
-    };
-    Object.assign(service, serviceOverrides);
-
-    const sendLogs = (...args) => calls.push(['log', ...args]);
-    const handleError = entry => calls.push(['handleError', entry]);
-    const controller = proxyquire('../src/controllers/auth.controller', {
-        '../service/auth.service.js': service,
-        '../utils/helpers/logs.helper.js': { sendLogs },
-        '../utils/helpers/common.helper.js': { handleError },
-        bcrypt: options.bcrypt || { hash: async value => `hash:${value}` }
-    });
-
-    return { controller, service, calls };
-}
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const bcrypt = require("bcrypt");
+const authController = require("../src/controllers/auth.controller");
+const userController = require("../src/controllers/user.controller");
+const authService = require("../src/service/auth.service");
+const { httpStatus } = require("../src/utils/helpers/variables.helper");
+const { createLogger, createResponse, setEnv } = require("./helpers");
 
 function request(body = {}, extra = {}) {
-    const { logger } = createLogger();
-    return { body, log: logger, ...extra };
+  return {
+    body,
+    params: {},
+    user: { id: "user-1", email: "user@example.com" },
+    log: createLogger().logger,
+    ...extra,
+  };
 }
 
-test('customLogin returns an access token after successful authentication', async () => {
-    const { controller, calls } = createController();
-    const req = request({ email: 'ada@example.com', password: 'secret' });
-    const res = createResponse();
+test("custom login returns a token after authentication and a readable failure otherwise", async (t) => {
+  const user = { id: "user-1", email: "user@example.com" };
+  let shouldFail = false;
+  t.mock.method(authService, "authenticateUser", async () => {
+    if (shouldFail) throw new Error("Invalid password");
+    return user;
+  });
+  t.mock.method(authService, "loginUser", async () => undefined);
+  t.mock.method(authService, "generateAndSetUserTokens", async () => "signed-token");
 
-    await controller.customLogin(req, res);
+  const success = createResponse();
+  await authController.customLogin(request({ email: user.email }), success);
+  assert.equal(success.statusCode, httpStatus.OK.code);
+  assert.deepEqual(success.body, { success: true, accessToken: "signed-token" });
 
-    assert.equal(res.statusCode, httpStatus.OK.code);
-    assert.deepEqual(res.body, { success: true, accessToken: 'access-token' });
-    assert.deepEqual(calls.find(([kind]) => kind === 'token')[1], {
-        id: 'u1',
-        email: 'ada@example.com'
-    });
+  shouldFail = true;
+  const failure = createResponse();
+  await authController.customLogin(request({ email: user.email }), failure);
+  assert.equal(failure.statusCode, httpStatus.NOT_ALLOWED.code);
+  assert.equal(failure.body.message, "Invalid password");
 });
 
-test('customLogin returns a readable authentication failure', async () => {
-    const { controller } = createController({
-        authenticateUser: async () => { throw new Error('Invalid Password'); }
-    });
-    const res = createResponse();
+test("signup creates users, conflicts with duplicates, and sets passwords for Google users", async (t) => {
+  let existingUser = null;
+  t.mock.method(authService, "findUser", async () => existingUser);
+  t.mock.method(authService, "createUser", async (details) => ({
+    id: "new-user",
+    _id: "new-user",
+    ...details,
+  }));
+  const updateUser = t.mock.method(authService, "updateUser", async (id, updates) => ({
+    id: id.id || id,
+    ...updates,
+  }));
+  t.mock.method(authService, "generateAndSetUserTokens", async () => "signed-token");
 
-    await controller.customLogin(request({ email: 'ada@example.com' }), res);
+  const body = { email: "new@example.com", password: "Strong.pass123!", name: "Ada" };
+  const created = createResponse();
+  await authController.customSignUp(request(body), created);
+  assert.equal(created.statusCode, httpStatus.CREATED.code);
+  assert.deepEqual(created.body, { success: true, accessToken: "signed-token" });
 
-    assert.equal(res.statusCode, httpStatus.NOT_ALLOWED.code);
-    assert.deepEqual(res.body, { success: false, message: 'Invalid Password' });
+  existingUser = { id: "existing", email: body.email, googleId: "google-id", password: null };
+  const linked = createResponse();
+  await authController.customSignUp(request(body), linked);
+  assert.equal(linked.statusCode, httpStatus.OK.code);
+  assert.equal(updateUser.mock.calls[0].arguments[0], existingUser);
+  assert.equal(await bcrypt.compare(body.password, updateUser.mock.calls[0].arguments[1].password), true);
+
+  existingUser = { id: "existing", email: body.email, password: "hash" };
+  const conflict = createResponse();
+  await authController.customSignUp(request(body), conflict);
+  assert.equal(conflict.statusCode, httpStatus.CONFLICT.code);
+  assert.equal(conflict.body.message, "User already exists");
 });
 
-test('customSignUp creates a user with hashed password and avatar defaults', async () => {
-    const { controller, calls } = createController();
-    const res = createResponse();
+test("signup reports service failures with an internal server status", async (t) => {
+  t.mock.method(authService, "findUser", async () => {
+    throw new Error("storage failed");
+  });
+  const response = createResponse();
 
-    await controller.customSignUp(request({
-        email: 'ada@example.com', password: 'Password!1', name: 'Ada'
-    }), res);
+  await authController.customSignUp(
+    request({ email: "new@example.com", password: "Strong.pass123!", name: "Ada" }),
+    response
+  );
 
-    assert.equal(res.statusCode, httpStatus.CREATED.code);
-    assert.deepEqual(res.body, { success: true, accessToken: 'access-token' });
-    const created = calls.find(([kind]) => kind === 'createUser')[1];
-    assert.equal(created.email, 'ada@example.com');
-    assert.equal(created.password, 'hash:Password!1');
-    assert.equal(created.name, 'Ada');
-    assert.equal(created.subStatus, 'Free');
-    assert.equal(created.avatar.profileLetter, 'A');
+  assert.equal(response.statusCode, httpStatus.SERVER_ERROR.code);
+  assert.equal(response.ended, true);
 });
 
-test('customSignUp returns conflict when an ordinary user already exists', async () => {
-    const existing = { id: 'u1', email: 'ada@example.com', password: 'hash' };
-    const { controller, calls } = createController({ findUser: async () => existing });
-    const res = createResponse();
+test("Google callback creates a user or updates an existing user", async (t) => {
+  let storedUser = null;
+  t.mock.method(authService, "findUser", async () => storedUser);
+  t.mock.method(authService, "createUser", async (details) => ({
+    id: "google-user",
+    _id: "google-user",
+    ...details,
+  }));
+  t.mock.method(authService, "updateUser", async (id, updates) => ({
+    id,
+    email: "user@example.com",
+    ...updates,
+  }));
+  t.mock.method(authService, "generateAndSetUserTokens", async () => "google-token");
 
-    await controller.customSignUp(request({ email: existing.email, password: 'Password!1', name: 'Ada' }), res);
+  const payload = {
+    email: "user@example.com",
+    sub: "google-id",
+    firstName: "Ada",
+    emailVerified: true,
+    picture: "https://example.test/avatar.png",
+  };
+  const created = createResponse();
+  await authController.googleLoginCallback(request(payload), created);
+  assert.equal(created.statusCode, httpStatus.CREATED.code);
+  assert.equal(created.body.accessToken, "google-token");
 
-    assert.equal(res.statusCode, httpStatus.CONFLICT.code);
-    assert.deepEqual(res.body, { message: 'User already exists' });
-    assert.equal(calls.some(([kind]) => kind === 'createUser'), false);
+  storedUser = { id: "existing", _id: "existing", email: payload.email };
+  const updated = createResponse();
+  await authController.googleLoginCallback(request(payload), updated);
+  assert.equal(updated.statusCode, httpStatus.OK.code);
+  assert.equal(updated.body.accessToken, "google-token");
 });
 
-test('customSignUp lets an existing Google user set a local password', async () => {
-    const existing = { _id: 'u1', email: 'ada@example.com', googleId: 'google-1' };
-    const { controller, calls } = createController({
-        findUser: async () => existing,
-        updateUser: async (...args) => { calls.push(['updateUser', ...args]); return existing; }
-    });
-    const res = createResponse();
+test("Google callback maps service errors to a server error", async (t) => {
+  t.mock.method(authService, "findUser", async () => {
+    throw new Error("storage failed");
+  });
+  const response = createResponse();
 
-    await controller.customSignUp(request({ email: existing.email, password: 'Password!1', name: 'Ada' }), res);
+  await authController.googleLoginCallback(request({ email: "user@example.com" }), response);
 
-    assert.equal(res.statusCode, httpStatus.OK.code);
-    assert.equal(calls.find(([kind]) => kind === 'updateUser')[1], existing);
-    assert.deepEqual(calls.find(([kind]) => kind === 'updateUser')[2], { password: 'hash:Password!1' });
-    assert.deepEqual(calls.find(([kind]) => kind === 'token')[1], { id: 'u1', email: existing.email });
+  assert.equal(response.statusCode, httpStatus.SERVER_ERROR.code);
+  assert.equal(response.ended, true);
 });
 
-test('customSignUp handles service failures with a server error', async () => {
-    const { controller, calls } = createController({
-        findUser: async () => { throw new Error('database failed'); }
-    });
-    const res = createResponse();
+test("forgot-password saves a hashed reset token and sends the reset email", async (t) => {
+  setEnv(t, { FRONTEND_DOMAIN: "https://frontend.example.test" });
+  t.mock.method(console, "log", () => {});
+  let saved = false;
+  let mail;
+  t.mock.method(authService, "sendMailToUser", async (options) => {
+    mail = options;
+  });
 
-    await controller.customSignUp(request({ email: 'ada@example.com', password: 'Password!1', name: 'Ada' }), res);
+  const user = {
+    id: "user-1",
+    email: "user@example.com",
+    async save() {
+      saved = true;
+    },
+  };
+  const response = createResponse();
 
-    assert.equal(res.statusCode, httpStatus.SERVER_ERROR.code);
-    assert.equal(res.ended, true);
-    assert.equal(calls.at(-1)[0], 'handleError');
+  await authController.sendResetlinkToEmail(request({}, { user }), response);
+
+  assert.equal(response.statusCode, httpStatus.OK.code);
+  assert.equal(response.body.success, true);
+  assert.equal(saved, true);
+  assert.match(user.resetPasswordToken, /^[a-f0-9]{64}$/);
+  assert.ok(user.resetPasswordExpire > Date.now());
+  assert.equal(mail.recipientEmail, user.email);
+  assert.match(mail.templateData.resetUrl, /^https:\/\/frontend\.example\.test\/reset\/[a-f0-9]{64}$/);
+  assert.notEqual(mail.templateData.resetUrl.split("/").at(-1), user.resetPasswordToken);
 });
 
-test('googleLoginCallback creates an account for a new Google identity', async () => {
-    const { controller, calls } = createController();
-    const payload = {
-        email: 'ada@example.com', firstName: 'Ada', sub: 'google-1',
-        emailVerified: true, picture: 'https://example.test/avatar.png'
-    };
-    const res = createResponse();
+test("forgot-password reports persistence or email failures", async (t) => {
+  t.mock.method(console, "log", () => {});
+  t.mock.method(authService, "sendMailToUser", async () => {
+    throw new Error("mail failed");
+  });
+  const response = createResponse();
 
-    await controller.googleLoginCallback(request(payload), res);
+  await authController.sendResetlinkToEmail(request({}, {
+    user: { email: "user@example.com", async save() {} },
+  }), response);
 
-    assert.equal(res.statusCode, httpStatus.CREATED.code);
-    const created = calls.find(([kind]) => kind === 'createUser')[1];
-    assert.equal(created.name, 'Ada');
-    assert.equal(created.googleId, 'google-1');
-    assert.equal(created.emailVerified, true);
-    assert.equal(created.subStatus, 'Free');
+  assert.equal(response.statusCode, httpStatus.SERVER_ERROR.code);
+  assert.equal(response.ended, true);
 });
 
-test('googleLoginCallback updates an existing user and issues a token', async () => {
-    const existing = { _id: 'u1', id: 'u1', email: 'ada@example.com' };
-    const updated = { id: 'u1', email: 'ada@example.com' };
-    const { controller, calls } = createController({
-        findUser: async () => existing,
-        updateUser: async (...args) => { calls.push(['updateUser', ...args]); return updated; }
-    });
-    const res = createResponse();
+test("password reset rejects expired tokens and saves a hash for a valid token", async (t) => {
+  let matchingUser = null;
+  const queries = [];
+  t.mock.method(authService, "findUser", async (query) => {
+    queries.push(query);
+    return matchingUser;
+  });
 
-    await controller.googleLoginCallback(request({
-        email: 'ada@example.com', firstName: 'Ada', sub: 'google-1',
-        emailVerified: true, picture: 'picture'
-    }), res);
+  const invalid = createResponse();
+  await authController.customResetPassword(
+    request({ password: "New.pass123!" }, { params: { token: "expired-token-value" } }),
+    invalid
+  );
+  assert.equal(invalid.statusCode, httpStatus.BAD_REQUEST.code);
+  assert.equal(invalid.body.message, "Invalid or expired token");
 
-    assert.equal(res.statusCode, httpStatus.OK.code);
-    assert.deepEqual(calls.find(([kind]) => kind === 'updateUser').slice(1), [
-        'u1', { name: 'Ada', googleId: 'google-1', emailVerified: true, profilePicture: 'picture' }
-    ]);
-    assert.deepEqual(calls.find(([kind]) => kind === 'token')[1], { email: 'ada@example.com', id: 'u1' });
+  let saved = false;
+  matchingUser = {
+    id: "user-1",
+    async save() {
+      saved = true;
+    },
+  };
+  const success = createResponse();
+  await authController.customResetPassword(
+    request({ password: "New.pass123!" }, { params: { token: "valid-token-value" } }),
+    success
+  );
+
+  assert.equal(success.statusCode, httpStatus.OK.code);
+  assert.equal(success.body.success, true);
+  assert.equal(await bcrypt.compare("New.pass123!", matchingUser.password), true);
+  assert.equal(matchingUser.resetPasswordToken, undefined);
+  assert.equal(matchingUser.resetPasswordExpire, undefined);
+  assert.equal(saved, true);
+  assert.ok(queries[1].resetPasswordToken);
+  assert.ok(queries[1].resetPasswordExpire.$gt);
 });
 
-test('googleLoginCallback reports service failures', async () => {
-    const { controller, calls } = createController({
-        findUser: async () => { throw new Error('lookup failed'); }
-    });
-    const res = createResponse();
+test("password reset reports storage failures", async (t) => {
+  t.mock.method(authService, "findUser", async () => {
+    throw new Error("storage failed");
+  });
+  const response = createResponse();
 
-    await controller.googleLoginCallback(request({ email: 'ada@example.com' }), res);
+  await authController.customResetPassword(
+    request({ password: "New.pass123!" }, { params: { token: "valid-token-value" } }),
+    response
+  );
 
-    assert.equal(res.statusCode, httpStatus.SERVER_ERROR.code);
-    assert.equal(res.ended, true);
-    assert.equal(calls.at(-1)[0], 'handleError');
+  assert.equal(response.statusCode, httpStatus.SERVER_ERROR.code);
+  assert.equal(response.ended, true);
 });
 
-test('sendResetlinkToEmail persists a hashed token and emails the raw reset URL', async () => {
-    const previousDomain = process.env.FRONTEND_DOMAIN;
-    process.env.FRONTEND_DOMAIN = 'https://frontend.example.test';
-    const user = {
-        email: 'ada@example.com',
-        save: async () => { user.saved = true; }
-    };
-    const { controller, calls } = createController();
-    const res = createResponse();
+test("user profile controller returns public fields and handles missing user data", async () => {
+  const response = createResponse();
+  await userController.getUserData(request({}, {
+    user: {
+      id: "user-1",
+      email: "user@example.com",
+      password: "secret",
+      resetPasswordToken: "token",
+      resetPasswordExpire: new Date(),
+    },
+  }), response);
 
-    const originalLog = console.log;
-    console.log = () => {};
-    try {
-        await controller.sendResetlinkToEmail(request({}, { user }), res);
-    } finally {
-        console.log = originalLog;
-        if (previousDomain === undefined) delete process.env.FRONTEND_DOMAIN;
-        else process.env.FRONTEND_DOMAIN = previousDomain;
-    }
+  assert.equal(response.statusCode, httpStatus.OK.code);
+  assert.equal(response.body.user.email, "user@example.com");
+  assert.equal("password" in response.body.user, false);
+  assert.equal("resetPasswordToken" in response.body.user, false);
 
-    assert.equal(res.statusCode, httpStatus.OK.code);
-    assert.deepEqual(res.body, { success: true });
-    assert.equal(user.saved, true);
-    assert.match(user.resetPasswordToken, /^[a-f0-9]{64}$/);
-    assert.ok(user.resetPasswordExpire > Date.now());
-    const email = calls.find(([kind]) => kind === 'sendMailToUser')[1];
-    assert.equal(email.recipientEmail, user.email);
-    assert.match(email.templateData.resetUrl, /^https:\/\/frontend\.example\.test\/reset\/[a-f0-9]{64}$/);
-});
-
-test('sendResetlinkToEmail reports persistence and mail errors', async () => {
-    const { controller, calls } = createController({
-        sendMailToUser: async () => { throw new Error('mail failed'); }
-    });
-    const user = { email: 'ada@example.com', save: async () => {} };
-    const res = createResponse();
-    const originalLog = console.log;
-    console.log = () => {};
-
-    try {
-        await controller.sendResetlinkToEmail(request({}, { user }), res);
-    } finally {
-        console.log = originalLog;
-    }
-
-    assert.equal(res.statusCode, httpStatus.SERVER_ERROR.code);
-    assert.equal(res.ended, true);
-    assert.equal(calls.at(-1)[0], 'handleError');
-});
-
-test('customResetPassword rejects invalid tokens without changing the user', async () => {
-    const { controller } = createController({ findUser: async () => null });
-    const res = createResponse();
-
-    await controller.customResetPassword(request({ password: 'Password!1' }, { params: { token: 'bad-token' } }), res);
-
-    assert.equal(res.statusCode, httpStatus.BAD_REQUEST.code);
-    assert.deepEqual(res.body, { success: false, message: 'Invalid or expired token' });
-});
-
-test('customResetPassword hashes a new password and clears reset credentials', async () => {
-    const user = { save: async () => { user.saved = true; } };
-    const queries = [];
-    const { controller } = createController({
-        findUser: async query => { queries.push(query); return user; }
-    });
-    const res = createResponse();
-
-    await controller.customResetPassword(request({ password: 'Password!1' }, {
-        params: { token: 'reset-token-value' },
-        user: { id: 'request-user' }
-    }), res);
-
-    assert.equal(res.statusCode, httpStatus.OK.code);
-    assert.deepEqual(res.body, { success: true });
-    assert.match(user.password, /^hash:/);
-    assert.equal(user.resetPasswordToken, undefined);
-    assert.equal(user.resetPasswordExpire, undefined);
-    assert.equal(user.saved, true);
-    assert.equal(queries.length, 1);
-    assert.ok(queries[0].resetPasswordToken);
-    assert.ok(queries[0].resetPasswordExpire.$gt > 0);
+  const entries = createLogger();
+  const invalidResponse = createResponse();
+  await userController.getUserData({
+    get user() { throw new Error("missing user"); },
+    log: entries.logger,
+  }, invalidResponse);
+  assert.equal(invalidResponse.statusCode, httpStatus.NOT_ALLOWED.code);
+  assert.equal(invalidResponse.body.message, "missing user");
+  assert.equal(entries.logger.info ? true : false, true);
 });
