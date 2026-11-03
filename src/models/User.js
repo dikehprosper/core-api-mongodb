@@ -10,7 +10,7 @@ const userSchema = new mongoose.Schema({
         default: undefined
     },
     profilePicture: String,
-    emailVerified: { type: Boolean, defaultValue: false },
+    emailVerified: { type: Boolean, default: false },
     avatar: {
         profilePicBg: String,
         profileLetter: String

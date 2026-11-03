@@ -32,8 +32,7 @@ app.use(passport.initialize());
 app.use("/api/auth", authRoutes);
 
 // Protected Routes (ENTER OTHER ROUTES HERE)
-app.use(authenticateUser);
-app.use("/api/users", userRoutes);
+app.use("/api/users", authenticateUser, userRoutes);
 
 // Error Handler
 app.use(handlers.error);
@@ -57,6 +56,8 @@ const startServer = async () => {
         process.exit(1);
     }
 };
-startServer();
+if (require.main === module) {
+    startServer();
+}
 
 module.exports = app;

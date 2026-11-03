@@ -26,7 +26,8 @@ CORE-API/
 │   │   ├── mongo.config.js
 │   │   └── passport.config.js
 │   ├── controllers/
-│   │   └── auth.controller.js
+│   │   ├── auth.controller.js
+│   │   └── user.controller.js
 │   ├── middlewares/
 │   │   ├── access.middleware.js
 │   │   ├── authMiddleware.js
@@ -82,7 +83,7 @@ This API is ready to go for most authentication and user management needs. You c
 1. Clone the repository:
    ```bash
    git clone <repo-url>
-   cd CORE-API
+   cd <name>
    ```
 2. Install dependencies:
    ```bash
@@ -126,6 +127,13 @@ npm start
 ```
 The server will start on the port specified in your `.env` file (default: 5001).
 
+## Running Tests
+```bash
+npm test
+```
+
+The test suite uses Node.js's built-in test runner and exercises the API without requiring a live MongoDB instance or external authentication/email services.
+
 
 
 ## API Endpoints (Main Examples)
@@ -149,6 +157,5 @@ Pull requests are welcome! For major changes, please open an issue first to disc
 
 ## License
 [MIT](LICENSE)
-
 
 

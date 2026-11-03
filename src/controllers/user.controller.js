@@ -27,10 +27,12 @@ module.exports = {
  * @throws Will catch and handle any unexpected errors during execution
  */
 async function getUserData(req, res) {
-    // Extract user and logging context from request
-    const { user, log } = req;
-
+    let log;
+    let user;
     try {
+        log = req.log;
+        user = req.user;
+
         /**
          * Remove sensitive fields from the user object
          * to prevent exposure in API response

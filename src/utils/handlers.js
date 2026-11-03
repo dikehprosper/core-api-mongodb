@@ -151,7 +151,7 @@ function routesWrapper(fns) {
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  */
-function error(error, req, res) {
+function error(error, req, res, _next) {
     try {
         // Log error with user context
         sendLogs(req.log, error.logLevel, {
