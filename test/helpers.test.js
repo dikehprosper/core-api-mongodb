@@ -39,31 +39,17 @@ test("log helper dispatches supported levels and reports invalid levels", () => 
   assert.equal(entries.at(-1).message, "Invalid Log Level");
 });
 
-test("handleError logs database errors and rolls back an optional transaction", () => {
+test("handleError logs MongoDB and application errors without exposing extra properties", () => {
   const { logger, entries } = createLogger();
-  let rolledBack = false;
-  const info = {
-    error: Object.assign(new Error("query failed"), { name: "SequelizeDatabaseError" }),
-  };
+  const error = Object.assign(new Error("query failed"), { name: "MongoServerError", code: 11000 });
+  const info = { error };
 
-  handleError({ loggerInstance: logger, info }, {
-    rollback() {
-      rolledBack = true;
-    },
-  });
-
-  assert.equal(rolledBack, true);
-  assert.equal(entries[0].level, "error");
-  assert.equal(entries[0].message.message, "postgres database error");
-  assert.equal(info.error.name, "SequelizeDatabaseError");
-});
-
-test("handleError logs ordinary application errors without a transaction", () => {
-  const { logger, entries } = createLogger();
-  handleError({ loggerInstance: logger, info: { error: new Error("failed") } });
+  handleError({ loggerInstance: logger, info });
 
   assert.equal(entries[0].message.message, "server error");
-  assert.equal(entries[0].message.info.error.message, "failed");
+  assert.equal(entries[0].message.info.error.name, "MongoServerError");
+  assert.equal(entries[0].message.info.error.message, "query failed");
+  assert.equal("code" in info.error, false);
 });
 
 test("child Joi schema keeps required and optional fields", () => {
@@ -74,7 +60,7 @@ test("child Joi schema keeps required and optional fields", () => {
   );
 
   assert.equal(schema.validate({ email: "person@example.com" }).error, undefined);
-  assert.equal(schema.validate({ email: "person@example.com", password: "pass" }).error, undefined);
+  assert.equal(schema.validate({ email: "person@example.com", password: "Valid.pass123!" }).error, undefined);
   assert.ok(schema.validate({ email: "bad" }).error);
   assert.ok(schema.validate({}).error);
 });

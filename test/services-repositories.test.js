@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const passport = require("../src/config/passport.config");
 const bcrypt = require("bcrypt");
+const logger = require("../src/config/logger.config");
 const authService = require("../src/service/auth.service");
 const repository = require("../src/repositories/User.repository");
 const User = require("../src/models/User");
@@ -63,6 +64,13 @@ test("MongoDB connection helper connects with MONGO_URI and reports connection f
   assert.equal(connect.mock.callCount(), 2);
 });
 
+test("AWS SES and Pino configuration export their configured clients", () => {
+  assert.equal(typeof ses.sendEmail, "function");
+  assert.equal(typeof logger.info, "function");
+  assert.equal(typeof logger.error, "function");
+  assert.equal(typeof logger.level, "string");
+});
+
 test("Passport local strategy handles unknown users, Google accounts, bad passwords and errors", async (t) => {
   const strategy = passport._strategy("login");
   let lookupResult = null;
@@ -105,11 +113,14 @@ test("Passport local strategy handles unknown users, Google accounts, bad passwo
 test("auth service delegates authentication, login, repository and mail operations", async (t) => {
   const user = { id: "user-1" };
   let authenticate = (done) => done(null, user);
-  t.mock.method(passport, "authenticate", () => (req, res, next) => authenticate());
+  t.mock.method(passport, "authenticate", (strategy, options, done) => () => authenticate(done));
   assert.equal(await authService.authenticateUser({}, "login"), user);
 
-  authenticate = () => { throw new Error("strategy failed"); };
+  authenticate = (done) => done(new Error("strategy failed"));
   await assert.rejects(authService.authenticateUser({}, "login"), /strategy failed/);
+
+  authenticate = (done) => done(null, false, { message: "denied" });
+  await assert.rejects(authService.authenticateUser({}, "login"), { message: "denied" });
 
   const loginRequest = { login: (actualUser, options, done) => done(null) };
   await authService.loginUser(loginRequest, user);

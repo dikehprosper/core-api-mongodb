@@ -250,13 +250,13 @@ test("user profile controller returns public fields and handles missing user dat
   assert.equal("password" in response.body.user, false);
   assert.equal("resetPasswordToken" in response.body.user, false);
 
-  const entries = createLogger();
+  const { logger, entries } = createLogger();
   const invalidResponse = createResponse();
   await userController.getUserData({
     get user() { throw new Error("missing user"); },
-    log: entries.logger,
+    log: logger,
   }, invalidResponse);
   assert.equal(invalidResponse.statusCode, httpStatus.NOT_ALLOWED.code);
   assert.equal(invalidResponse.body.message, "missing user");
-  assert.equal(entries.logger.info ? true : false, true);
+  assert.equal(entries[0].level, "info");
 });
