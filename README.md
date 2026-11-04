@@ -1,6 +1,6 @@
 
 
-# CORE-API
+# CORE-API-MONGODB
 
 A fast starter kit for authentication and user management, built with Node.js, Express, and MongoDB. This API is designed for developers who want to quickly set up a secure backend without writing everything from scratch. Just clone, install, and add your own features!
 
